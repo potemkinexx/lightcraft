@@ -83,10 +83,11 @@ fn import(_s: &mut Session, p: &Value) -> Result<Value> {
     if paths.is_empty() {
         return Err(bad(C, "no paths"));
     }
-    let activate_new = p.get("activate").and_then(Value::as_bool).unwrap_or(true);
+    let activate_new = p.get("activate").and_then(Value::as_bool);
     let (active_dir, library) = dirs(C)?;
     let (files, mut failed) = dcp_files(&paths);
     let mut imported = Vec::new();
+    let mut defaults_changed = false;
     for (name, bytes) in files {
         let dcp = match lightcraft_raw::dcp::parse(&bytes) {
             Ok(d) => d,
@@ -101,12 +102,18 @@ fn import(_s: &mut Session, p: &Value) -> Result<Value> {
         let tmp = file.with_extension("dcp.tmp");
         std::fs::write(&tmp, &bytes).map_err(|e| bad(C, format!("{}: {e}", tmp.display())))?;
         std::fs::rename(&tmp, &file).map_err(|e| bad(C, format!("{}: {e}", file.display())))?;
-        if activate_new {
+        // the first profile for a camera becomes its default; the others are chosen per photo
+        let make_default = activate_new.unwrap_or_else(|| !active_dir.join(cp::dcp_file_name(&dcp.model)).is_file());
+        if make_default {
             activate(C, &active_dir, &file)?;
         }
-        imported.push(json!({"model": dcp.model, "name": label, "file": file.to_string_lossy(), "active": activate_new}));
+        imported
+            .push(json!({"id": format!("dcp:{slug}"), "model": dcp.model, "name": label, "file": file.to_string_lossy(), "active": make_default}));
+        defaults_changed |= make_default;
     }
-    Ok(json!({"imported": imported, "failed": failed, "restart": !imported.is_empty() && activate_new}))
+    // imported profiles can be chosen per photo straight away (the camera's default changes on the next start)
+    lightcraft_raw::dcp::install_library(cp::library_dcps());
+    Ok(json!({"imported": imported, "failed": failed, "restart": defaults_changed}))
 }
 
 /// The library, each entry with whether it is the active profile for its model.
@@ -124,7 +131,8 @@ fn list(_s: &mut Session, _p: &Value) -> Result<Value> {
             match cp::load_dcp(&f) {
                 Ok(d) => {
                     let is_active = active.iter().any(|(a, ad)| ad.model == d.model && same(a, &f));
-                    out.push(json!({"model": d.model, "name": d.name, "copyright": d.copyright, "file": f.to_string_lossy(), "active": is_active}));
+                    let id = format!("dcp:{}", f.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                    out.push(json!({"id": id, "model": d.model, "name": d.name, "copyright": d.copyright, "file": f.to_string_lossy(), "active": is_active}));
                 }
                 Err(e) => out.push(json!({"file": f.to_string_lossy(), "error": e})),
             }
@@ -166,11 +174,11 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import Camera Profiles (.dcp)",
             [],
             None,
-            "{paths: [.dcp file, folder or .zip], activate?: true} — DNG camera profiles you own; each becomes the active colour profile for its camera model (UniqueCameraModel) from the next start → {imported: [{model, name, file, active}], failed, restart}",
+            "{paths: [.dcp file, folder or .zip], activate?: bool} — DNG camera profiles you own, chosen per photo (develop.cameraProfile); the first for a camera model (or each, with activate: true) also becomes that camera's default from the next start → {imported: [{id, model, name, file, active}], failed, restart}",
             always,
             import
         ),
-        cmd!(query "camera.listDcp", "Camera Profiles (.dcp)", [], None, "{} → {profiles: [{model, name, copyright, file, active}], inUse: [{model, name}]}", always, list),
+        cmd!(query "camera.listDcp", "Camera Profiles (.dcp)", [], None, "{} → {profiles: [{id, model, name, copyright, file, active}], inUse: [{model, name}]}", always, list),
         cmd!(
             "camera.useDcp",
             "Use Camera Profile",

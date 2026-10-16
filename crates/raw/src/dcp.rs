@@ -156,11 +156,57 @@ pub fn for_camera(make: Option<&str>, model: &str) -> Option<Arc<Dcp>> {
 /// [`for_camera`] for a camera written as one string, Exif make and model joined by a space (as
 /// the catalog keeps it): every split into make and model is tried, then the whole string.
 pub fn covers_camera(camera: &str) -> bool {
+    resolve_camera("", camera).is_some()
+}
+
+/// Whether a profile for `profile_model` fits a camera written as one string (see [`covers_camera`]).
+pub fn covers_model(profile_model: &str, camera: &str) -> bool {
     let words: Vec<&str> = camera.split_whitespace().collect();
     if words.is_empty() {
         return false;
     }
-    (1..words.len()).any(|i| for_camera(Some(&words[..i].join(" ")), &words[i..].join(" ")).is_some()) || for_camera(None, camera).is_some()
+    (1..words.len()).any(|i| matches(profile_model, Some(&words[..i].join(" ")), &words[i..].join(" "))) || matches(profile_model, None, camera)
+}
+
+fn library_registry() -> &'static RwLock<Vec<(String, Arc<Dcp>)>> {
+    static R: OnceLock<RwLock<Vec<(String, Arc<Dcp>)>>> = OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// Install the imported profiles that can be chosen per photo: `(id, profile)`, ids `dcp:…`.
+pub fn install_library(list: Vec<(String, Dcp)>) {
+    *library_registry().write().unwrap_or_else(PoisonError::into_inner) = list.into_iter().map(|(id, d)| (id, Arc::new(d))).collect();
+}
+
+/// The imported profiles, `(id, profile)`.
+pub fn library() -> Vec<(String, Arc<Dcp>)> {
+    library_registry().read().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+/// The imported profile with id `id`.
+pub fn library_get(id: &str) -> Option<Arc<Dcp>> {
+    library_registry().read().unwrap_or_else(PoisonError::into_inner).iter().find(|(i, _)| i == id).map(|(_, d)| d.clone())
+}
+
+/// The profile a photo's camera-profile choice (`profile.camera`) gives a camera (Exif make and
+/// model): `lc` none (LightCraft's own colour); `dcp:<id>` that imported profile when it exists and
+/// is for this camera; anything else (empty, or a profile that is gone or for another camera) the
+/// camera's default ([`for_camera`]). The decoder and the catalog both decide through this.
+pub fn resolve(choice: &str, make: Option<&str>, model: &str) -> Option<Arc<Dcp>> {
+    match choice {
+        "lc" => None,
+        c if c.starts_with("dcp:") => library_get(c).filter(|d| matches(&d.model, make, model)).or_else(|| for_camera(make, model)),
+        _ => for_camera(make, model),
+    }
+}
+
+/// [`resolve`] for a camera written as one string (see [`covers_camera`]).
+pub fn resolve_camera(choice: &str, camera: &str) -> Option<Arc<Dcp>> {
+    let words: Vec<&str> = camera.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+    (1..words.len()).find_map(|i| resolve(choice, Some(&words[..i].join(" ")), &words[i..].join(" "))).or_else(|| resolve(choice, None, camera))
 }
 
 #[cfg(test)]
@@ -240,7 +286,20 @@ mod tests {
         assert!(for_camera(Some("TESTCAM CO"), "ONE").is_some());
         assert!(covers_camera("TESTCAM CO TESTCAM ONE"));
         assert!(!covers_camera("OTHER CAM"));
+        // a photo's choice: LightCraft's own, an imported profile for the camera, or the default
+        let mut other = parse(&tiny_dcp("TESTCAM ONE")).unwrap();
+        other.name = "Other".into();
+        install_library(vec![("dcp:other".into(), other), ("dcp:two".into(), parse(&tiny_dcp("TESTCAM TWO")).unwrap())]);
+        assert!(resolve_camera("lc", "TESTCAM CO TESTCAM ONE").is_none());
+        assert_eq!(resolve_camera("dcp:other", "TESTCAM CO TESTCAM ONE").unwrap().name, "Other");
+        assert_eq!(resolve_camera("", "TESTCAM CO TESTCAM ONE").unwrap().name, "Test Look");
+        // a profile for another camera, or one that is gone: the default
+        assert_eq!(resolve_camera("dcp:two", "TESTCAM CO TESTCAM ONE").unwrap().name, "Test Look");
+        assert_eq!(resolve_camera("dcp:gone", "TESTCAM CO TESTCAM ONE").unwrap().name, "Test Look");
+        assert!(covers_model("TESTCAM TWO", "TESTCAM CO TESTCAM TWO"));
         install(Vec::new());
         assert!(!covers_camera("TESTCAM CO TESTCAM ONE"));
+        assert!(resolve_camera("dcp:two", "TESTCAM CO TESTCAM TWO").is_some(), "a chosen profile needs no default");
+        install_library(Vec::new());
     }
 }

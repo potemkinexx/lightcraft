@@ -1842,12 +1842,13 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                     Ok(v) => {
                         let n = v["imported"].as_array().map_or(0, Vec::len);
                         if n > 0 {
-                            parts.push(crate::i18n::tr_format!(
-                                "Imported {n} camera profile{} (.dcp) — restart LightCraft to use {}",
-                                if n == 1 { "" } else { "s" },
-                                if n == 1 { "it" } else { "them" },
-                                n = n
+                            parts.push(format!(
+                                "Imported {n} camera profile{} (.dcp): pick one per photo in Profiles ▸ Camera Profile",
+                                if n == 1 { "" } else { "s" }
                             ));
+                        }
+                        if v["restart"].as_bool() == Some(true) {
+                            parts.push(crate::i18n::tr("A new camera default applies after a restart").to_string());
                         }
                         problems.extend(v["failed"].as_array().into_iter().flatten().map(|f| {
                             let name = f.get(0).and_then(Value::as_str).unwrap_or_default();

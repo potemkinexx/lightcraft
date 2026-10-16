@@ -230,7 +230,30 @@ pub fn active_dcps() -> Vec<(PathBuf, lightcraft_raw::dcp::Dcp)> {
         .collect()
 }
 
-/// Install the active `.dcp` profiles for this process (once; later calls do nothing).
+/// The imported `.dcp` files in [`dcp_library_dir`]: `(id, profile)`, the id being `dcp:<file stem>`.
+pub fn library_dcps() -> Vec<(String, lightcraft_raw::dcp::Dcp)> {
+    let Some(d) = dcp_library_dir() else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&d) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> =
+        entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("dcp"))).collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_string_lossy().to_string();
+            match load_dcp(&p) {
+                Ok(d) => Some((format!("dcp:{stem}"), d)),
+                Err(e) => {
+                    eprintln!("lightcraft: ignoring camera profile {e}");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Install the active `.dcp` profiles (each camera's default) and the imported library (chosen per
+/// photo) for this process (once; later calls do nothing).
 pub fn install_dcps() {
     static DONE: OnceLock<()> = OnceLock::new();
     DONE.get_or_init(|| {
@@ -239,19 +262,45 @@ pub fn install_dcps() {
             log::info!("camera profiles (.dcp): {}", list.iter().map(|d| format!("{} ({})", d.name, d.model)).collect::<Vec<_>>().join(", "));
         }
         lightcraft_raw::dcp::install(list);
+        lightcraft_raw::dcp::install_library(library_dcps());
     });
 }
 
-/// Replace `color` with the installed `.dcp` for the camera `meta` names, if there is one.
-/// Returns the profile's name when one was applied.
-pub fn apply_dcp(color: &mut lightcraft_raw::ColorData, meta: &lightcraft_meta::Metadata) -> Option<String> {
+/// Separates a photo's camera-profile choice from its file path in a [`crate::media::SourceRef`]
+/// (a character no file name holds).
+const CAMERA_SEP: char = '\u{1f}';
+
+/// `path` carrying a photo's camera-profile choice to the file loader (unchanged when the choice is
+/// the default, empty).
+pub fn with_camera(path: &str, camera: &str) -> String {
+    if camera.is_empty() { path.to_string() } else { format!("{path}{CAMERA_SEP}{camera}") }
+}
+
+/// The file path and camera-profile choice [`with_camera`] joined.
+pub fn split_camera(path: &str) -> (&str, Option<&str>) {
+    match path.split_once(CAMERA_SEP) {
+        Some((p, c)) if !c.is_empty() => (p, Some(c)),
+        Some((p, _)) => (p, None),
+        None => (path, None),
+    }
+}
+
+/// Replace `color` with the colour model a photo's camera-profile choice names (see
+/// [`lightcraft_raw::dcp::resolve`]): an imported `.dcp`, its camera's default `.dcp`, or nothing
+/// (LightCraft's own colour). Returns the profile's name when one was applied.
+pub fn apply_choice(color: &mut lightcraft_raw::ColorData, meta: &lightcraft_meta::Metadata, camera: Option<&str>) -> Option<String> {
     let model = meta.model.as_deref()?;
-    let dcp = lightcraft_raw::dcp::for_camera(meta.make.as_deref(), model)?;
+    let dcp = lightcraft_raw::dcp::resolve(camera.unwrap_or(""), meta.make.as_deref(), model)?;
     dcp.apply(color);
     if lightcraft_pipeline::profiling() {
         eprintln!("[profile] camera colour from {:?} ({})", dcp.name, dcp.model);
     }
     Some(dcp.name.clone())
+}
+
+/// [`apply_choice`] with the camera's default.
+pub fn apply_dcp(color: &mut lightcraft_raw::ColorData, meta: &lightcraft_meta::Metadata) -> Option<String> {
+    apply_choice(color, meta, None)
 }
 
 /// Per camera model: the photos read and their pooled colour pairs.

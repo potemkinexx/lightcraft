@@ -367,10 +367,10 @@ mod tests {
     fn damaged_tables_are_errors_not_panics() {
         let good = table_text(4, 2, 2, |c| c);
         let at = good.find("crs:Table_ABCDEF0123=\"").unwrap() + 22;
-        for cut in [0usize, 1, 5, 9, 40, 200] {
+        let end = good[at..].find('"').unwrap() + at;
+        for cut in [0usize, 1, 5, 9, (end - at) / 2, end - at - 6] {
             let mut bad = good.clone();
-            let end = bad[at..].find('"').unwrap() + at;
-            let keep = (at + cut).min(end);
+            let keep = at + cut;
             bad.replace_range(keep..end, "");
             assert!(parse(&bad, "x").is_err(), "cut {cut}");
         }
