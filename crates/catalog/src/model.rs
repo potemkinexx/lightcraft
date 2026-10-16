@@ -340,7 +340,10 @@ pub fn relative_wb_format(format: &str) -> bool {
 /// whatever the file's fit gives (issue #730). A camera in `lightcraft_raw::kelvin_presets` does the same through
 /// its own presets. The engine's render path (`files.rs`) decides the same way from the file; both must agree.
 pub fn relative_wb_camera(format: &str, camera: &str) -> bool {
-    relative_wb_format(format) && lightcraft_raw::spectral::find_camera(camera).is_none() && !lightcraft_raw::kelvin_presets::covers_camera(camera)
+    relative_wb_format(format)
+        && !lightcraft_raw::dcp::covers_camera(camera)
+        && lightcraft_raw::spectral::find_camera(camera).is_none()
+        && !lightcraft_raw::kelvin_presets::covers_camera(camera)
 }
 
 /// This build's version: what a photo's [`Photo::preview_checked`] stamp is compared with. Every
@@ -415,7 +418,8 @@ impl Photo {
     /// WB multipliers, no colour matrices in the file; RWL and RAW are Leica's and the oldest Panasonic bodies'
     /// names for RW2 files). The engine's `camera_preview::file_local_look` covers the same formats.
     pub fn fitted_look(&self) -> bool {
-        self.develops_raw() && relative_wb_format(&self.format)
+        // (a raw whose camera has an installed `.dcp` takes its colour from the profile instead)
+        self.develops_raw() && relative_wb_format(&self.format) && !lightcraft_raw::dcp::covers_camera(&self.meta.camera)
     }
     /// White balance relative to the camera's as-shot look, as for rendered photographs: a
     /// [`Photo::fitted_look`] raw whose camera has no colour matrices measured either
