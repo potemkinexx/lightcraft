@@ -138,6 +138,12 @@ fn list(_s: &mut Session, _p: &Value) -> Result<Value> {
             }
         }
     }
+    // profiles loaded without a file here (the web app keeps them in browser storage)
+    for (id, d) in lightcraft_raw::dcp::library() {
+        if !out.iter().any(|v| v["id"] == id.as_str()) {
+            out.push(json!({"id": id, "model": d.model, "name": d.name, "copyright": d.copyright, "active": false}));
+        }
+    }
     let in_use: Vec<Value> = lightcraft_raw::dcp::installed().iter().map(|d| json!({"model": d.model, "name": d.name})).collect();
     Ok(json!({"profiles": out, "inUse": in_use}))
 }

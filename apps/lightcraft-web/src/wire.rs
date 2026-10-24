@@ -129,9 +129,17 @@ impl WireJob {
     /// Identifies the decoded source this job needs.
     fn source_key(&self) -> String {
         match &self.origin {
-            Source::File { path } => format!("{}:{:?}:{}:{path}", self.cache_generation, self.source_identity, self.max_edge),
+            // (a raw's camera-profile choice decides how it is decoded)
+            Source::File { path } => {
+                format!("{}:{:?}:{}:{path}:{}", self.cache_generation, self.source_identity, self.max_edge, self.camera_choice().unwrap_or(""))
+            }
             Source::Demo { scene } => format!("{}:{:?}:{}:demo:{scene}", self.cache_generation, self.source_identity, self.max_edge),
         }
+    }
+
+    /// The raw's camera-profile choice (`profile.camera`), `None` for the default.
+    pub fn camera_choice(&self) -> Option<&str> {
+        Some(self.settings.profile.camera.as_str()).filter(|c| self.raw && !c.is_empty())
     }
 
     /// Storage key of the cached thumbnail.
@@ -181,7 +189,7 @@ impl WorkerCore {
             None => {
                 let src = match (&job.origin, original) {
                     (Source::File { .. }, Some(bytes)) => {
-                        let (image, info) = lightcraft_engine::files::load_bytes(bytes, job.max_edge)?;
+                        let (image, info) = lightcraft_engine::files::load_bytes_as(bytes, job.max_edge, job.camera_choice())?;
                         DecodedSource::new(Arc::new(image), Some(info))
                     }
                     (Source::File { path }, None) => return Err(format!("{path}: original not found in browser storage")),

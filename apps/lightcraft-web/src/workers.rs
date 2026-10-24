@@ -103,6 +103,21 @@ async fn handle(scope: &web_sys::DedicatedWorkerGlobalScope, backend: Option<Bac
             }
         }
         set(&out, "cacheMiss", &cache_miss.into());
+        // imported profiles this job uses and this worker hasn't read yet (the main thread keeps them in storage)
+        if let Some(b) = &backend {
+            for name in lightcraft_engine::profile_bytes::missing_for(&job.settings) {
+                let key = format!("{}/{name}", lightcraft_engine::profile_bytes::DIR);
+                match b.read(&key).await {
+                    Ok(Some(bytes)) => {
+                        if let Err(e) = lightcraft_engine::profile_bytes::load_stored(&name, &bytes) {
+                            log::warn!("render worker: profile {name}: {e}");
+                        }
+                    }
+                    Ok(None) => log::warn!("render worker: profile {name} is not in browser storage"),
+                    Err(e) => log::warn!("render worker: profile {name}: {e}"),
+                }
+            }
+        }
         let original = match CORE.with(|c| c.borrow_mut().needs_original(&job)) {
             Some(hash) => match &backend {
                 Some(b) => b.read(&crate::store::storage_key(&hash)).await?,

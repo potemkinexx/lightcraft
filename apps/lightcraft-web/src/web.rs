@@ -23,7 +23,18 @@ use crate::store::{Originals, content_hash, download_name, storage_key};
 use crate::wire::ThumbIndex;
 use crate::workers::{THUMB_INDEX, Workers};
 
-const ACCEPT: &str = ".jpg,.jpeg,.png,.tif,.tiff,.webp,.dng,.cr2,.nef,.arw,.psd,.jxl,.gif,.bmp";
+// (camera profiles and looks too: .dcp, XMP looks, .cube and zips of them become profiles, not photos)
+const ACCEPT: &str = ".jpg,.jpeg,.png,.tif,.tiff,.webp,.dng,.cr2,.nef,.arw,.psd,.jxl,.gif,.bmp,.dcp,.xmp,.cube,.zip";
+
+thread_local! {
+    /// Profile files picked or dropped, waiting for the next frame to import them: `(name, bytes)`.
+    static PENDING_PROFILES: std::cell::RefCell<Vec<(String, Vec<u8>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether a picked or dropped file is a profile (or a zip, which may hold some).
+fn is_profile_file(name: &str, bytes: &[u8]) -> bool {
+    lightcraft_engine::profile_bytes::is_profile(name, bytes) || name.to_ascii_lowercase().ends_with(".zip")
+}
 
 /// After a failed save, wait this long before trying again (ms).
 const SAVE_RETRY_MS: f64 = 2000.0;
@@ -97,6 +108,11 @@ impl Options {
 
 /// Store a picked/dropped file (bytes into browser storage, then queue its import).
 async fn store_file(originals: Originals, backend: Option<Backend>, name: String, bytes: Vec<u8>, ctx: egui::Context) {
+    if is_profile_file(&name, &bytes) {
+        PENDING_PROFILES.with(|p| p.borrow_mut().push((name, bytes)));
+        ctx.request_repaint();
+        return;
+    }
     let hash = content_hash(&bytes);
     if let Some(b) = &backend
         && let Err(e) = b.write(&storage_key(&hash), &bytes).await
@@ -331,6 +347,18 @@ async fn boot(opts: Options) -> Boot {
         if let Ok(Some(j)) = b.read(THUMB_INDEX).await {
             index = ThumbIndex::from_json(&j);
         }
+        // imported camera profiles and looks (personal fork): available to this page's own renders
+        for name in b.list(lightcraft_engine::profile_bytes::DIR).await.unwrap_or_default() {
+            match b.read(&format!("{}/{name}", lightcraft_engine::profile_bytes::DIR)).await {
+                Ok(Some(bytes)) => {
+                    if let Err(e) = lightcraft_engine::profile_bytes::load_stored(&name, &bytes) {
+                        log::warn!("profile {name}: {e}");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("profile {name}: {e}"),
+            }
+        }
         crate::backend::request_persistence(|granted| {
             if !granted {
                 notice(
@@ -492,6 +520,7 @@ impl WebApp {
                 }
             });
         }
+        self.import_profiles(ctx);
         let paths = self.originals.take_pending();
         if !paths.is_empty() {
             let n = paths.len();
@@ -499,6 +528,50 @@ impl WebApp {
                 Ok(_) => self.app.toast(ctx, format!("Added {n} photo{}", if n == 1 { "" } else { "s" })),
                 Err(e) => log::warn!("import: {e}"),
             }
+        }
+    }
+
+    /// Import profile files picked or dropped since the last frame, and keep each one in browser storage
+    /// (render workers read them from there; the next start loads them again).
+    fn import_profiles(&mut self, ctx: &egui::Context) {
+        let pending = PENDING_PROFILES.with(|p| std::mem::take(&mut *p.borrow_mut()));
+        if pending.is_empty() {
+            return;
+        }
+        let (mut cameras, mut looks, mut problems) = (0, 0, Vec::new());
+        for (name, bytes) in pending {
+            let (done, failed) = lightcraft_engine::profile_bytes::import(&mut self.app.session, &name, &bytes);
+            for (report, stored) in done {
+                if report["kind"] == "camera" {
+                    cameras += 1
+                } else {
+                    looks += 1
+                }
+                if let Some(b) = self.backend.clone() {
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let key = format!("{}/{}", lightcraft_engine::profile_bytes::DIR, stored.name);
+                        if let Err(e) = b.write(&key, &stored.bytes).await {
+                            notice(format!("{} was not saved in browser storage ({e}); it will be gone after a reload.", stored.name));
+                        }
+                    });
+                }
+            }
+            problems.extend(failed.iter().map(|f| format!("{}: {}", f[0].as_str().unwrap_or_default(), f[1].as_str().unwrap_or_default())));
+        }
+        let mut parts = Vec::new();
+        if cameras > 0 {
+            parts.push(format!("Imported {cameras} camera profile{} (Profiles ▸ Camera Profile)", if cameras == 1 { "" } else { "s" }));
+        }
+        if looks > 0 {
+            parts.push(format!("Imported {looks} look{} (Profile browser)", if looks == 1 { "" } else { "s" }));
+        }
+        if problems.is_empty() {
+            if !parts.is_empty() {
+                self.app.toast(ctx, parts.join(" · "));
+            }
+        } else {
+            parts.push(format!("{} failed: {}", problems.len(), problems.iter().take(2).cloned().collect::<Vec<_>>().join("; ")));
+            self.app.toast_error(ctx, parts.join(" · "));
         }
     }
 

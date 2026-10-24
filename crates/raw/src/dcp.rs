@@ -178,6 +178,13 @@ pub fn install_library(list: Vec<(String, Dcp)>) {
     *library_registry().write().unwrap_or_else(PoisonError::into_inner) = list.into_iter().map(|(id, d)| (id, Arc::new(d))).collect();
 }
 
+/// Add (or replace) one imported profile.
+pub fn add_library(id: &str, dcp: Dcp) {
+    let mut lib = library_registry().write().unwrap_or_else(PoisonError::into_inner);
+    lib.retain(|(i, _)| i != id);
+    lib.push((id.to_string(), Arc::new(dcp)));
+}
+
 /// The imported profiles, `(id, profile)`.
 pub fn library() -> Vec<(String, Arc<Dcp>)> {
     library_registry().read().unwrap_or_else(PoisonError::into_inner).clone()
